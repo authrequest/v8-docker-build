@@ -37,6 +37,7 @@ Building V8 natively on macOS for a Linux target is painful. This wraps the enti
 | `--args` | yes | File with GN build args (see `args/debug.gn` for example) |
 | `--patch` | no | Patch file to apply after checkout |
 | `--jobs` | no | Parallel compile jobs (default: half of available cores) |
+| `--quick` | no | Skip fetch/checkout/sync — just rebuild with current source |
 | `--rebuild` | no | Force Docker image rebuild |
 
 ## Output
@@ -71,6 +72,16 @@ gdb -x .gdbinit ./d8
 ```
 
 The `.gdbinit` maps container build paths to the local source copy so GDB can resolve source lines automatically.
+
+## Quick Rebuild
+
+After the initial build, edit source files in `<target>/v8/src/` (e.g. add debug prints), then rebuild without re-fetching:
+
+```bash
+./build.sh --quick --target ~/Documents/vm-shared/cve-2024-1234 --args args/debug.gn
+```
+
+This syncs your edits back into the build volume and runs ninja. Only recompiles changed files.
 
 ## GN Args
 

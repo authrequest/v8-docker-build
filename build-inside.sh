@@ -7,10 +7,72 @@ GN_ARGS_FILE="$3"
 OUTPUT_DIR="$4"
 MAX_JOBS="${5:-}"
 
+QUICK_MODE="${QUICK_MODE:-false}"
+
 echo "========================================"
 echo "  V8 Builder"
-echo "  Revision: $REVISION"
+if [ "$QUICK_MODE" = "true" ]; then
+    echo "  Mode: QUICK REBUILD"
+else
+    echo "  Revision: $REVISION"
+fi
 echo "========================================"
+
+# ---- Ensure depot_tools is bootstrapped ----
+gclient --version >/dev/null 2>&1 || true
+
+# ---- Quick rebuild mode ----
+if [ "$QUICK_MODE" = "true" ]; then
+    cd /v8/v8
+
+    # Sync edited source files from output back into build tree
+    if [ -d "$OUTPUT_DIR/v8/src" ]; then
+        echo "[1/3] Syncing source edits from output into build tree..."
+        rsync -a "$OUTPUT_DIR/v8/src/" /v8/v8/src/
+        rsync -a "$OUTPUT_DIR/v8/include/" /v8/v8/include/ 2>/dev/null || true
+    else
+        echo "[1/3] No source edits to sync"
+    fi
+
+    # Configure (in case args changed)
+    echo "[2/3] Configuring build..."
+    GN_ARGS=$(tr '\n' ' ' < "$GN_ARGS_FILE" | sed 's/  */ /g; s/^ //; s/ $//')
+    if [[ "$GN_ARGS" != *"cc_wrapper"* ]]; then
+        GN_ARGS="$GN_ARGS cc_wrapper=\"ccache\""
+    fi
+    gn gen out/x64-debug --args="$GN_ARGS"
+
+    # Build
+    TOTAL_CORES=$(nproc)
+    if [ -n "$MAX_JOBS" ]; then
+        JOBS="$MAX_JOBS"
+    else
+        JOBS=$(( TOTAL_CORES / 2 ))
+        [ "$JOBS" -lt 2 ] && JOBS=2
+    fi
+    echo "[3/3] Rebuilding d8 ($JOBS cores)..."
+    ninja -j"$JOBS" -C out/x64-debug d8
+
+    echo "  d8 built: $(file out/x64-debug/d8 | cut -d: -f2)"
+
+    # Copy binaries
+    mkdir -p "$OUTPUT_DIR/out"
+    cp out/x64-debug/d8 "$OUTPUT_DIR/out/"
+    for f in icudtl.dat snapshot_blob.bin; do
+        [ -f "out/x64-debug/$f" ] && cp "out/x64-debug/$f" "$OUTPUT_DIR/out/"
+    done
+
+    # Sync source back to output (picks up any torque-generated changes)
+    rsync -a --delete /v8/v8/src/ "$OUTPUT_DIR/v8/src/"
+    rsync -a --delete /v8/v8/include/ "$OUTPUT_DIR/v8/include/"
+
+    echo ""
+    echo "========================================"
+    echo "  Quick rebuild complete!"
+    echo "========================================"
+    echo "  d8 binary: $OUTPUT_DIR/out/d8"
+    exit 0
+fi
 
 # ---- Helper: clear stale lock files left by crashed processes ----
 clear_stale_locks() {

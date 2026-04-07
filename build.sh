@@ -19,6 +19,8 @@ Required:
 Optional:
   --patch    Patch file to apply after checkout (omit to skip)
   --jobs     Max parallel compile jobs (default: nproc/2 to avoid OOM)
+  --quick    Skip fetch/checkout/sync — just rebuild with current source
+             Edit files in <target>/v8/, they get synced back before build
   --rebuild  Force Docker image rebuild
 
 Example:
@@ -44,6 +46,7 @@ PATCH_FILE=""
 GN_ARGS_FILE=""
 MAX_JOBS=""
 FORCE_REBUILD=false
+QUICK_MODE=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -52,15 +55,21 @@ while [[ $# -gt 0 ]]; do
         --patch)    PATCH_FILE="$2";   shift 2;;
         --args)     GN_ARGS_FILE="$2"; shift 2;;
         --jobs)     MAX_JOBS="$2";     shift 2;;
+        --quick)    QUICK_MODE=true;   shift;;
         --rebuild)  FORCE_REBUILD=true; shift;;
         -h|--help)  usage;;
         *)          echo "Unknown option: $1"; usage;;
     esac
 done
 
-[[ -z "$REVISION" ]]     && echo "Error: --rev is required"    && usage
-[[ -z "$TARGET" ]]        && echo "Error: --target is required" && usage
-[[ -z "$GN_ARGS_FILE" ]] && echo "Error: --args is required"   && usage
+if [[ "$QUICK_MODE" == true ]]; then
+    [[ -z "$TARGET" ]]        && echo "Error: --target is required" && usage
+    [[ -z "$GN_ARGS_FILE" ]] && echo "Error: --args is required"   && usage
+else
+    [[ -z "$REVISION" ]]     && echo "Error: --rev is required"    && usage
+    [[ -z "$TARGET" ]]        && echo "Error: --target is required" && usage
+    [[ -z "$GN_ARGS_FILE" ]] && echo "Error: --args is required"   && usage
+fi
 
 # Resolve full paths
 GN_ARGS_FULL="$(cd "$(dirname "$GN_ARGS_FILE")" && pwd)/$(basename "$GN_ARGS_FILE")"
@@ -97,6 +106,7 @@ DOCKER_ARGS=(
     -v "$SCRIPT_DIR/build-inside.sh:/usr/local/bin/build-inside.sh:ro"
     -v "$GN_ARGS_FULL:/tmp/gn_args.txt:ro"
     -e CCACHE_DIR=/root/.ccache
+    -e QUICK_MODE="$QUICK_MODE"
 )
 
 # Patch mount (optional)
@@ -113,7 +123,8 @@ fi
 
 # ---- Run build ----
 echo "[*] Starting build container..."
-echo "    Revision: $REVISION"
+[[ "$QUICK_MODE" == true ]] && echo "    Mode:     QUICK (rebuild only)"
+[[ -n "$REVISION" ]]  && echo "    Revision: $REVISION"
 echo "    Target:   $OUTPUT_DIR"
 echo "    GN args:  $GN_ARGS_FILE"
 [[ -n "$PATCH_FILE" ]] && echo "    Patch:    $PATCH_FILE"
@@ -122,7 +133,7 @@ echo ""
 
 docker run "${DOCKER_ARGS[@]}" \
     "$IMAGE_NAME" \
-    "$REVISION" "$PATCH_ARG" "/tmp/gn_args.txt" "/output" "$MAX_JOBS"
+    "${REVISION:-none}" "$PATCH_ARG" "/tmp/gn_args.txt" "/output" "$MAX_JOBS"
 
 echo ""
 echo "[*] Output ready at: $OUTPUT_DIR"
