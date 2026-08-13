@@ -10,7 +10,11 @@ Build V8's `d8` binary or `v8dasm` bytecode disassembler for Linux x64 using Doc
 ## Usage
 
 ```bash
+# Linux / macOS / Git Bash
 ./build.sh --rev <commit_hash> --target <output_path> --args <gn_args_file> [options]
+
+# Windows PowerShell
+.\build.ps1 -Rev <commit_hash> -Target <output_path> -Args <gn_args_file> [options]
 ```
 
 **Flags:**
@@ -31,11 +35,10 @@ Build V8's `d8` binary or `v8dasm` bytecode disassembler for Linux x64 using Doc
 ### d8 (default) — Debug shell for exploit dev
 
 ```bash
-./build.sh \
-  --rev 12.1.285.26 \
-  --target ~/vm-shared/cve-2024-1234 \
-  --args args/debug.gn \
-  --patch exploit.patch
+./build.sh --rev 12.1.285.26 --target ~/vm-shared/cve-2024-1234 --args args/debug.gn --patch exploit.patch
+
+# PowerShell
+.\build.ps1 -Rev 12.1.285.26 -Target .\output\cve-2024-1234 -Args args\debug.gn -Patch exploit.patch
 ```
 
 Output:
@@ -53,12 +56,10 @@ v8/include/             # headers
 Builds `v8dasm`, a standalone tool that loads V8 bytecode cache files (`.jsc`) and prints their disassembled bytecode. Uses a patched V8 monolith build.
 
 ```bash
-./build.sh \
-  --mode dasm \
-  --rev 2b2f6915852 \
-  --target ~/vm-shared/dasm \
-  --args args/dasm.gn \
-  --patch patches/dasm.patch
+./build.sh --mode dasm --rev 2b2f6915852 --target ~/vm-shared/dasm --args args/dasm.gn --patch patches/dasm.patch
+
+# PowerShell
+.\build.ps1 -Mode dasm -Rev 2b2f6915852 -Target .\output\dasm -Args args\dasm.gn -Patch patches\dasm.patch
 ```
 
 Output:
@@ -85,6 +86,10 @@ After the initial build, edit source files in `<target>/v8/src/`, then rebuild w
 ```bash
 ./build.sh --quick --target ~/vm-shared/cve-2024-1234 --args args/debug.gn
 ./build.sh --quick --mode dasm --target ~/vm-shared/dasm --args args/dasm.gn
+
+# PowerShell
+.\build.ps1 -Quick -Target .\output\cve-2024-1234 -Args args\debug.gn
+.\build.ps1 -Quick -Mode dasm -Target .\output\dasm -Args args\dasm.gn
 ```
 
 ## GN Args
