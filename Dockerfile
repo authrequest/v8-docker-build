@@ -18,4 +18,10 @@ RUN ccache -M 10G
 
 WORKDIR /v8
 
+# Bake the entrypoint script into the image so the container is
+# self-contained (the runtime bind mount in build.ps1 overrides this
+# copy when it works, but a failed/absent mount no longer breaks exec).
+COPY build-inside.sh /usr/local/bin/build-inside.sh
+RUN chmod +x /usr/local/bin/build-inside.sh
+
 ENTRYPOINT ["/usr/local/bin/build-inside.sh"]

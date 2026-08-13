@@ -94,7 +94,7 @@ $DockerArgs = @(
     "-v", "v8-src:/v8"
     "-v", "ccache-vol:/root/.ccache"
     "-v", "${OutputDir}:/output"
-    "-v", "${ScriptDir}\build-inside.sh:/usr/local/bin/build-inside.sh:ro"
+    "-v", "$((Join-Path $ScriptDir 'build-inside.sh').Replace('\', '/')):/usr/local/bin/build-inside.sh:ro"
     "-v", "${GnArgsPath}:/tmp/gn_args.txt:ro"
     "-e", "CCACHE_DIR=/root/.ccache"
     "-e", "QUICK_MODE=$($Quick.ToString().ToLower())"
