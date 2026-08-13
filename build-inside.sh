@@ -8,15 +8,99 @@ OUTPUT_DIR="$4"
 MAX_JOBS="${5:-}"
 
 QUICK_MODE="${QUICK_MODE:-false}"
+BUILD_MODE="${BUILD_MODE:-d8}"
+
+# Set build parameters based on mode
+if [ "$BUILD_MODE" = "dasm" ]; then
+    BUILD_DIR="out/x64-release"
+    NINJA_TARGETS="v8_monolith v8_libplatform"
+    OUTPUT_BINARY="v8dasm"
+else
+    BUILD_DIR="out/x64-debug"
+    NINJA_TARGETS="d8"
+    OUTPUT_BINARY="d8"
+fi
 
 echo "========================================"
 echo "  V8 Builder"
 if [ "$QUICK_MODE" = "true" ]; then
-    echo "  Mode: QUICK REBUILD"
+    echo "  Mode: QUICK REBUILD ($BUILD_MODE)"
 else
     echo "  Revision: $REVISION"
+    echo "  Build: $BUILD_MODE"
 fi
 echo "========================================"
+
+# ---- v8dasm compile+link function ----
+compile_v8dasm() {
+    local V8_DIR="/v8/v8"
+    local CLANG="$V8_DIR/third_party/llvm-build/Release+Asserts/bin/clang++"
+
+    cp /tmp/v8dasm.cpp "$V8_DIR/v8dasm.cpp"
+
+    echo "  Compiling v8dasm.cpp..."
+    "$CLANG" -std=c++20 -fno-exceptions -O2 \
+        -I"$V8_DIR" -I"$V8_DIR/include" \
+        -isystem "$V8_DIR/buildtools/third_party/libc++" \
+        -isystem "$V8_DIR/third_party/libc++/src/include" \
+        -DV8_COMPRESS_POINTERS \
+        -D_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_EXTENSIVE \
+        -D_LIBCPP_DISABLE_VISIBILITY_ANNOTATIONS \
+        -c "$V8_DIR/v8dasm.cpp" -o "$V8_DIR/v8dasm.o"
+
+    echo "  Linking v8dasm..."
+
+    local MONOLITH="$V8_DIR/$BUILD_DIR/obj/libv8_monolith.a"
+    local LIBPLATFORM="$V8_DIR/$BUILD_DIR/obj/libv8_libplatform.a"
+
+    if [ ! -f "$MONOLITH" ]; then
+        echo "  ERROR: libv8_monolith.a not found at $MONOLITH"
+        echo "  Searching for it..."
+        find "$V8_DIR/$BUILD_DIR" -name "*v8_monolith*" -o -name "*monolith*" 2>/dev/null | head -5
+        return 1
+    fi
+    if [ ! -f "$LIBPLATFORM" ]; then
+        echo "  ERROR: libv8_libplatform.a not found at $LIBPLATFORM"
+        echo "  Searching for it..."
+        find "$V8_DIR/$BUILD_DIR" -name "*libplatform*" 2>/dev/null | head -5
+        return 1
+    fi
+
+    # Find libc++ — try .o files first, then .a archive
+    local LIBCXX_OBJS_DIR="$V8_DIR/$BUILD_DIR/obj/buildtools/third_party/libc++/libc++"
+    local LIBCXX_LINK_ARGS=()
+
+    if ls "$LIBCXX_OBJS_DIR"/*.o >/dev/null 2>&1; then
+        LIBCXX_LINK_ARGS=("$LIBCXX_OBJS_DIR"/*.o)
+    elif [ -f "$LIBCXX_OBJS_DIR/libc++.a" ]; then
+        LIBCXX_LINK_ARGS=("$LIBCXX_OBJS_DIR/libc++.a")
+    fi
+
+    local LIBCXXABI_DIR="$V8_DIR/$BUILD_DIR/obj/buildtools/third_party/libc++abi/libc++abi"
+    if ls "$LIBCXXABI_DIR"/*.o >/dev/null 2>&1; then
+        LIBCXX_LINK_ARGS+=("$LIBCXXABI_DIR"/*.o)
+    elif [ -f "$LIBCXXABI_DIR/libc++abi.a" ]; then
+        LIBCXX_LINK_ARGS+=("$LIBCXXABI_DIR/libc++abi.a")
+    fi
+
+    if [ ${#LIBCXX_LINK_ARGS[@]} -gt 0 ]; then
+        "$CLANG" -nostdlib++ -o "$V8_DIR/v8dasm" \
+            "$V8_DIR/v8dasm.o" \
+            "$MONOLITH" \
+            "$LIBPLATFORM" \
+            "${LIBCXX_LINK_ARGS[@]}" \
+            -lpthread -ldl -latomic -lrt
+    else
+        echo "  WARNING: libc++ objects not found, linking without -nostdlib++"
+        "$CLANG" -o "$V8_DIR/v8dasm" \
+            "$V8_DIR/v8dasm.o" \
+            "$MONOLITH" \
+            "$LIBPLATFORM" \
+            -lpthread -ldl -latomic -lrt
+    fi
+
+    echo "  v8dasm built: $(file "$V8_DIR/v8dasm" | cut -d: -f2)"
+}
 
 # ---- Ensure depot_tools is bootstrapped ----
 gclient --version >/dev/null 2>&1 || true
@@ -27,20 +111,20 @@ if [ "$QUICK_MODE" = "true" ]; then
 
     # Sync edited source files from output back into build tree
     if [ -d "$OUTPUT_DIR/v8/src" ]; then
-        echo "[1/3] Syncing source edits from output into build tree..."
+        echo "[1/4] Syncing source edits from output into build tree..."
         rsync -a "$OUTPUT_DIR/v8/src/" /v8/v8/src/
         rsync -a "$OUTPUT_DIR/v8/include/" /v8/v8/include/ 2>/dev/null || true
     else
-        echo "[1/3] No source edits to sync"
+        echo "[1/4] No source edits to sync"
     fi
 
     # Configure (in case args changed)
-    echo "[2/3] Configuring build..."
+    echo "[2/4] Configuring build..."
     GN_ARGS=$(tr '\n' ' ' < "$GN_ARGS_FILE" | sed 's/  */ /g; s/^ //; s/ $//')
     if [[ "$GN_ARGS" != *"cc_wrapper"* ]]; then
         GN_ARGS="$GN_ARGS cc_wrapper=\"ccache\""
     fi
-    gn gen out/x64-debug --args="$GN_ARGS"
+    gn gen "$BUILD_DIR" --args="$GN_ARGS"
 
     # Build
     TOTAL_CORES=$(nproc)
@@ -50,17 +134,27 @@ if [ "$QUICK_MODE" = "true" ]; then
         JOBS=$(( TOTAL_CORES / 2 ))
         [ "$JOBS" -lt 2 ] && JOBS=2
     fi
-    echo "[3/3] Rebuilding d8 ($JOBS cores)..."
-    ninja -j"$JOBS" -C out/x64-debug d8
+    echo "[3/4] Rebuilding $NINJA_TARGETS ($JOBS cores)..."
+    ninja -j"$JOBS" -C "$BUILD_DIR" $NINJA_TARGETS
 
-    echo "  d8 built: $(file out/x64-debug/d8 | cut -d: -f2)"
+    # Compile v8dasm if in dasm mode
+    if [ "$BUILD_MODE" = "dasm" ]; then
+        echo "[4/4] Compiling v8dasm..."
+        compile_v8dasm
+    else
+        echo "  d8 built: $(file "$BUILD_DIR/d8" | cut -d: -f2)"
+    fi
 
     # Copy binaries
     mkdir -p "$OUTPUT_DIR/out"
-    cp out/x64-debug/d8 "$OUTPUT_DIR/out/"
-    for f in icudtl.dat snapshot_blob.bin; do
-        [ -f "out/x64-debug/$f" ] && cp "out/x64-debug/$f" "$OUTPUT_DIR/out/"
-    done
+    if [ "$BUILD_MODE" = "dasm" ]; then
+        cp /v8/v8/v8dasm "$OUTPUT_DIR/out/"
+    else
+        cp "$BUILD_DIR/d8" "$OUTPUT_DIR/out/"
+        for f in icudtl.dat snapshot_blob.bin; do
+            [ -f "$BUILD_DIR/$f" ] && cp "$BUILD_DIR/$f" "$OUTPUT_DIR/out/"
+        done
+    fi
 
     # Sync source back to output (picks up any torque-generated changes)
     rsync -a --delete /v8/v8/src/ "$OUTPUT_DIR/v8/src/"
@@ -70,7 +164,7 @@ if [ "$QUICK_MODE" = "true" ]; then
     echo "========================================"
     echo "  Quick rebuild complete!"
     echo "========================================"
-    echo "  d8 binary: $OUTPUT_DIR/out/d8"
+    echo "  $OUTPUT_BINARY binary: $OUTPUT_DIR/out/$OUTPUT_BINARY"
     exit 0
 fi
 
@@ -106,19 +200,19 @@ gclient_sync_retry() {
 # ---- 1. Fetch or update V8 source ----
 clear_stale_locks
 if [ ! -f "/v8/.gclient" ]; then
-    echo "[1/6] Fetching V8 source (first run — takes ~20-30 min)..."
+    echo "[1/7] Fetching V8 source (first run — takes ~20-30 min)..."
     cd /v8
     fetch v8
     cd /v8/v8
-    echo "[1/6] Installing build dependencies..."
+    echo "[1/7] Installing build dependencies..."
     ./build/install-build-deps.sh --no-prompt --no-chromeos-fonts 2>&1 | tail -5 || true
 else
-    echo "[1/6] V8 source already fetched"
+    echo "[1/7] V8 source already fetched"
     cd /v8/v8
 fi
 
 # ---- 2. Checkout revision ----
-echo "[2/6] Checking out revision $REVISION..."
+echo "[2/7] Checking out revision $REVISION..."
 git checkout -- . 2>/dev/null || true
 git clean -fd 2>/dev/null || true
 git fetch origin
@@ -135,15 +229,15 @@ gclient_sync_retry
 
 # ---- 3. Apply patch ----
 if [ "$PATCH_FILE" != "none" ] && [ -f "$PATCH_FILE" ]; then
-    echo "[3/6] Applying patch: $(basename "$PATCH_FILE")"
+    echo "[3/7] Applying patch: $(basename "$PATCH_FILE")"
     git apply "$PATCH_FILE"
     echo "  Patch applied"
 else
-    echo "[3/6] No patch to apply"
+    echo "[3/7] No patch to apply"
 fi
 
 # ---- 4. Configure GN ----
-echo "[4/6] Configuring build..."
+echo "[4/7] Configuring build..."
 GN_ARGS=$(tr '\n' ' ' < "$GN_ARGS_FILE" | sed 's/  */ /g; s/^ //; s/ $//')
 
 # Inject ccache if not already specified
@@ -152,11 +246,9 @@ if [[ "$GN_ARGS" != *"cc_wrapper"* ]]; then
 fi
 
 echo "  Args: $GN_ARGS"
-gn gen out/x64-debug --args="$GN_ARGS"
+gn gen "$BUILD_DIR" --args="$GN_ARGS"
 
-# ---- 5. Build d8 ----
-# Default to half of available cores to avoid OOM under Rosetta emulation.
-# Each clang++ can use 1-2GB+ RAM with -O3, and Rosetta adds overhead.
+# ---- 5. Build ----
 TOTAL_CORES=$(nproc)
 if [ -n "$MAX_JOBS" ]; then
     JOBS="$MAX_JOBS"
@@ -164,26 +256,41 @@ else
     JOBS=$(( TOTAL_CORES / 2 ))
     [ "$JOBS" -lt 2 ] && JOBS=2
 fi
-echo "[5/6] Building d8 ($JOBS/$TOTAL_CORES cores — use --jobs to override)..."
-ninja -j"$JOBS" -C out/x64-debug d8
+echo "[5/7] Building $NINJA_TARGETS ($JOBS/$TOTAL_CORES cores — use --jobs to override)..."
+ninja -j"$JOBS" -C "$BUILD_DIR" $NINJA_TARGETS
 
-echo "  d8 built: $(file out/x64-debug/d8 | cut -d: -f2)"
+if [ "$BUILD_MODE" = "d8" ]; then
+    echo "  d8 built: $(file "$BUILD_DIR/d8" | cut -d: -f2)"
+fi
 
-# ---- 6. Copy artifacts ----
-echo "[6/6] Copying artifacts to output..."
+# ---- 6. Compile v8dasm (dasm mode only) ----
+if [ "$BUILD_MODE" = "dasm" ]; then
+    echo "[6/7] Compiling v8dasm..."
+    compile_v8dasm
+else
+    echo "[6/7] Skipping (d8 mode)"
+fi
 
-# Binaries
+# ---- 7. Copy artifacts ----
+echo "[7/7] Copying artifacts to output..."
+
 mkdir -p "$OUTPUT_DIR/out"
-cp out/x64-debug/d8 "$OUTPUT_DIR/out/"
-for f in icudtl.dat snapshot_blob.bin; do
-    if [ -f "out/x64-debug/$f" ]; then
-        cp "out/x64-debug/$f" "$OUTPUT_DIR/out/"
-        echo "  Copied $f"
-    fi
-done
+
+if [ "$BUILD_MODE" = "dasm" ]; then
+    cp /v8/v8/v8dasm "$OUTPUT_DIR/out/"
+    echo "  Copied v8dasm"
+else
+    cp "$BUILD_DIR/d8" "$OUTPUT_DIR/out/"
+    for f in icudtl.dat snapshot_blob.bin; do
+        if [ -f "$BUILD_DIR/$f" ]; then
+            cp "$BUILD_DIR/$f" "$OUTPUT_DIR/out/"
+            echo "  Copied $f"
+        fi
+    done
+fi
 
 # Source tree for debug reference (src/, include/, tools/)
-echo "  Syncing source for debug reference..."
+echo "  Syncing source for reference..."
 for dir in src include; do
     mkdir -p "$OUTPUT_DIR/v8/$dir"
     rsync -a --delete "/v8/v8/$dir/" "$OUTPUT_DIR/v8/$dir/"
@@ -196,8 +303,9 @@ if [ "$PATCH_FILE" != "none" ] && [ -f "$PATCH_FILE" ]; then
     cp "$PATCH_FILE" "$OUTPUT_DIR/patch.diff"
 fi
 
-# GDB/pwndbg init helper
-cat > "$OUTPUT_DIR/out/.gdbinit" << 'GDBEOF'
+# GDB/pwndbg init helper (d8 mode only)
+if [ "$BUILD_MODE" = "d8" ]; then
+    cat > "$OUTPUT_DIR/out/.gdbinit" << 'GDBEOF'
 # V8 source path mapping for pwndbg/GDB
 # Build was done at /v8/v8/ — map to local source copy
 set substitute-path /v8/v8 ../v8
@@ -212,20 +320,30 @@ end
 source ../v8/tools/gdbinit
 source ../v8/tools/gdb/gdb_v8.py
 GDBEOF
+fi
 
 echo ""
 echo "========================================"
 echo "  Build complete!"
 echo "========================================"
 echo ""
-echo "  d8 binary:  $OUTPUT_DIR/out/d8"
-echo "  source ref:  $OUTPUT_DIR/v8/"
-echo ""
-echo "  In your VM:"
-echo "    cd ~/Documents/vm-shared/$(basename "$OUTPUT_DIR")/out"
-echo "    ./d8 --allow-natives-syntax exploit.js"
-echo ""
-echo "  Debug with pwndbg:"
-echo "    cd ~/Documents/vm-shared/$(basename "$OUTPUT_DIR")/out"
-echo "    gdb -x .gdbinit ./d8"
-echo ""
+
+if [ "$BUILD_MODE" = "dasm" ]; then
+    echo "  v8dasm binary: $OUTPUT_DIR/out/v8dasm"
+    echo ""
+    echo "  Usage:"
+    echo "    ./v8dasm <path-to-jsc-file>"
+    echo ""
+else
+    echo "  d8 binary:  $OUTPUT_DIR/out/d8"
+    echo "  source ref:  $OUTPUT_DIR/v8/"
+    echo ""
+    echo "  In your VM:"
+    echo "    cd ~/Documents/vm-shared/$(basename "$OUTPUT_DIR")/out"
+    echo "    ./d8 --allow-natives-syntax exploit.js"
+    echo ""
+    echo "  Debug with pwndbg:"
+    echo "    cd ~/Documents/vm-shared/$(basename "$OUTPUT_DIR")/out"
+    echo "    gdb -x .gdbinit ./d8"
+    echo ""
+fi

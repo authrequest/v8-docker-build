@@ -1,10 +1,6 @@
 # v8-builder
 
-Build V8's `d8` binary for Linux x64 from macOS using Docker. Designed for CTF/exploit dev workflows where you need to checkout a specific V8 revision, apply a patch, and get a debuggable `d8` binary into a Linux VM.
-
-## Why
-
-Building V8 natively on macOS for a Linux target is painful. This wraps the entire V8 build toolchain (depot_tools, clang, gn, ninja) in a Docker container running linux/amd64 via Rosetta. You provide a revision + patch + GN args, and get back a ready-to-debug `d8` binary plus source files — all dropped into a shared folder your VM can access.
+Build V8's `d8` binary or `v8dasm` bytecode disassembler for Linux x64 using Docker. Designed for CTF/exploit dev and reverse engineering workflows.
 
 ## Prerequisites
 
@@ -14,18 +10,7 @@ Building V8 natively on macOS for a Linux target is painful. This wraps the enti
 ## Usage
 
 ```bash
-./build.sh --rev <commit_hash> --target <output_path> --args <gn_args_file> [--patch <file>] [--jobs <n>]
-```
-
-**Example:**
-
-```bash
-./build.sh \
-  --rev 12.1.285.26 \
-  --target ~/Documents/vm-shared/cve-2024-1234 \
-  --args args/debug.gn \
-  --patch challenge/oob.patch \
-  --jobs 4
+./build.sh --rev <commit_hash> --target <output_path> --args <gn_args_file> [options]
 ```
 
 **Flags:**
@@ -34,69 +19,86 @@ Building V8 natively on macOS for a Linux target is painful. This wraps the enti
 |------|----------|-------------|
 | `--rev` | yes | V8 git revision, tag, or branch |
 | `--target` | yes | Full path to output directory |
-| `--args` | yes | File with GN build args (see `args/debug.gn` for example) |
+| `--args` | yes | File with GN build args (see `args/`) |
+| `--mode` | no | `d8` (default) or `dasm` (bytecode disassembler) |
 | `--patch` | no | Patch file to apply after checkout |
 | `--jobs` | no | Parallel compile jobs (default: half of available cores) |
 | `--quick` | no | Skip fetch/checkout/sync — just rebuild with current source |
 | `--rebuild` | no | Force Docker image rebuild |
 
-## Output
+## Build Modes
 
-Everything lands in `<target>/`:
-
-```
-out/
-  d8                  # the binary
-  icudtl.dat          # required runtime data
-  snapshot_blob.bin   # required runtime data
-  .gdbinit            # source path mapping for pwndbg/GDB
-v8/
-  src/                # C++ source for debug reference
-  include/            # headers
-  tools/              # GDB helpers
-patch.diff            # copy of applied patch
-```
-
-## Debugging in VM
+### d8 (default) — Debug shell for exploit dev
 
 ```bash
-cd ~/Documents/vm-shared/<target>/out
-./d8 --allow-natives-syntax exploit.js
+./build.sh \
+  --rev 12.1.285.26 \
+  --target ~/vm-shared/cve-2024-1234 \
+  --args args/debug.gn \
+  --patch exploit.patch
 ```
 
-With pwndbg:
+Output:
+```
+out/d8                  # the binary
+out/icudtl.dat          # required runtime data
+out/snapshot_blob.bin   # required runtime data
+out/.gdbinit            # source path mapping for pwndbg/GDB
+v8/src/                 # C++ source for debug reference
+v8/include/             # headers
+```
+
+### dasm — V8 bytecode disassembler
+
+Builds `v8dasm`, a standalone tool that loads V8 bytecode cache files (`.jsc`) and prints their disassembled bytecode. Uses a patched V8 monolith build.
 
 ```bash
-cd ~/Documents/vm-shared/<target>/out
-gdb -x .gdbinit ./d8
+./build.sh \
+  --mode dasm \
+  --rev 2b2f6915852 \
+  --target ~/vm-shared/dasm \
+  --args args/dasm.gn \
+  --patch patches/dasm.patch
 ```
 
-The `.gdbinit` maps container build paths to the local source copy so GDB can resolve source lines automatically.
+Output:
+```
+out/v8dasm              # the disassembler binary
+v8/src/                 # patched V8 source for reference
+v8/include/             # headers
+```
+
+Usage:
+```bash
+./v8dasm path/to/code.jsc
+```
+
+The patch (`patches/dasm.patch`) modifies V8 to:
+- Dump `SharedFunctionInfo` and `BytecodeArray` during code cache deserialization
+- Remove string truncation so full strings are printed
+- Bypass `SanityCheck` and magic number validation to accept arbitrary `.jsc` files
 
 ## Quick Rebuild
 
-After the initial build, edit source files in `<target>/v8/src/` (e.g. add debug prints), then rebuild without re-fetching:
+After the initial build, edit source files in `<target>/v8/src/`, then rebuild without re-fetching:
 
 ```bash
-./build.sh --quick --target ~/Documents/vm-shared/cve-2024-1234 --args args/debug.gn
+./build.sh --quick --target ~/vm-shared/cve-2024-1234 --args args/debug.gn
+./build.sh --quick --mode dasm --target ~/vm-shared/dasm --args args/dasm.gn
 ```
-
-This syncs your edits back into the build volume and runs ninja. Only recompiles changed files.
 
 ## GN Args
 
-The included `args/debug.gn` is a full-debug config. Create your own file for different build profiles:
+Included configs in `args/`:
 
-```
-# args/release.gn
-is_debug=false
-target_cpu="x64"
-v8_enable_disassembler=true
-v8_enable_object_print=true
-```
+- `debug.gn` — Full debug d8 build (disassembler, object print, verify heap, slow dchecks)
+- `dasm.gn` — Release monolith build for v8dasm (no sandbox, no temporal, static library)
+
+Create your own file for different profiles.
 
 ## Notes
 
 - First run fetches the entire V8 source (~20-30 min). Subsequent runs reuse a persistent Docker volume.
 - ccache is persisted across builds — incremental rebuilds are fast.
 - If the build OOMs (compiler killed with no error message), reduce `--jobs` or increase Docker memory.
+- The dasm patch is tested against V8 15.0.1240245 (commit `2b2f6915852`). It may need updates for other versions.

@@ -6,10 +6,10 @@ IMAGE_NAME="v8-builder"
 
 usage() {
     cat <<EOF
-V8 d8 Builder — build d8 for Linux x64 in Docker, output to VM shared folder
+V8 Builder — build d8 or v8dasm for Linux x64 in Docker
 
 Usage:
-  $0 --rev <hash> --target <folder> --args <gn_args_file> [--patch <file>]
+  $0 --rev <hash> --target <folder> --args <gn_args_file> [options]
 
 Required:
   --rev      V8 git revision hash (or branch/tag)
@@ -17,24 +17,22 @@ Required:
   --args     File containing GN args (one per line)
 
 Optional:
+  --mode     Build mode: "d8" (default) or "dasm" (v8 bytecode disassembler)
   --patch    Patch file to apply after checkout (omit to skip)
   --jobs     Max parallel compile jobs (default: nproc/2 to avoid OOM)
   --quick    Skip fetch/checkout/sync — just rebuild with current source
-             Edit files in <target>/v8/, they get synced back before build
   --rebuild  Force Docker image rebuild
 
-Example:
-  $0 --rev 12.1.285.26 --target ~/Documents/vm-shared/cve-2024-1234 --args args/debug.gn --patch exploit.patch
+Examples:
+  # Build d8 for exploit dev
+  $0 --rev 12.1.285.26 --target ~/vm-shared/cve-2024-1234 --args args/debug.gn --patch exploit.patch
 
-Output structure in <target>/:
-  out/d8              — the d8 binary
-  out/icudtl.dat      — ICU data
-  out/snapshot_blob.bin
-  out/.gdbinit        — pwndbg/GDB helper (source path mapping)
-  v8/src/             — V8 source for debug reference
-  v8/include/         — V8 headers
-  v8/tools/           — GDB helpers & V8 tools
-  patch.diff          — copy of applied patch (if any)
+  # Build v8dasm bytecode disassembler
+  $0 --mode dasm --rev 2b2f6915852 --target ~/vm-shared/dasm --args args/dasm.gn --patch patches/dasm.patch
+
+Output structure (<target>/):
+  d8 mode:   out/d8, out/icudtl.dat, out/snapshot_blob.bin, out/.gdbinit, v8/src/, v8/include/
+  dasm mode: out/v8dasm, v8/src/, v8/include/
 EOF
     exit 1
 }
@@ -47,6 +45,7 @@ GN_ARGS_FILE=""
 MAX_JOBS=""
 FORCE_REBUILD=false
 QUICK_MODE=false
+BUILD_MODE="d8"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -55,12 +54,19 @@ while [[ $# -gt 0 ]]; do
         --patch)    PATCH_FILE="$2";   shift 2;;
         --args)     GN_ARGS_FILE="$2"; shift 2;;
         --jobs)     MAX_JOBS="$2";     shift 2;;
+        --mode)     BUILD_MODE="$2";   shift 2;;
         --quick)    QUICK_MODE=true;   shift;;
         --rebuild)  FORCE_REBUILD=true; shift;;
         -h|--help)  usage;;
         *)          echo "Unknown option: $1"; usage;;
     esac
 done
+
+# Validate mode
+if [[ "$BUILD_MODE" != "d8" && "$BUILD_MODE" != "dasm" ]]; then
+    echo "Error: --mode must be 'd8' or 'dasm'"
+    exit 1
+fi
 
 if [[ "$QUICK_MODE" == true ]]; then
     [[ -z "$TARGET" ]]        && echo "Error: --target is required" && usage
@@ -107,7 +113,18 @@ DOCKER_ARGS=(
     -v "$GN_ARGS_FULL:/tmp/gn_args.txt:ro"
     -e CCACHE_DIR=/root/.ccache
     -e QUICK_MODE="$QUICK_MODE"
+    -e BUILD_MODE="$BUILD_MODE"
 )
+
+# Mount v8dasm.cpp for dasm mode
+if [[ "$BUILD_MODE" == "dasm" ]]; then
+    V8DASM_SRC="$SCRIPT_DIR/v8dasm.cpp"
+    if [[ ! -f "$V8DASM_SRC" ]]; then
+        echo "Error: v8dasm.cpp not found at $V8DASM_SRC"
+        exit 1
+    fi
+    DOCKER_ARGS+=(-v "$V8DASM_SRC:/tmp/v8dasm.cpp:ro")
+fi
 
 # Patch mount (optional)
 PATCH_ARG="none"
@@ -124,6 +141,7 @@ fi
 # ---- Run build ----
 echo "[*] Starting build container..."
 [[ "$QUICK_MODE" == true ]] && echo "    Mode:     QUICK (rebuild only)"
+echo "    Build:    $BUILD_MODE"
 [[ -n "$REVISION" ]]  && echo "    Revision: $REVISION"
 echo "    Target:   $OUTPUT_DIR"
 echo "    GN args:  $GN_ARGS_FILE"
@@ -137,4 +155,8 @@ docker run "${DOCKER_ARGS[@]}" \
 
 echo ""
 echo "[*] Output ready at: $OUTPUT_DIR"
-ls -lh "$OUTPUT_DIR/out/d8" 2>/dev/null || echo "Warning: d8 not found in output"
+if [[ "$BUILD_MODE" == "dasm" ]]; then
+    ls -lh "$OUTPUT_DIR/out/v8dasm" 2>/dev/null || echo "Warning: v8dasm not found in output"
+else
+    ls -lh "$OUTPUT_DIR/out/d8" 2>/dev/null || echo "Warning: d8 not found in output"
+fi
